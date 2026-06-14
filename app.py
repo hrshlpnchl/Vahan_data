@@ -390,7 +390,7 @@ with tab1:
             fig.update_geos(fitbounds="locations", visible=False,
                             bgcolor=THEME["bg_primary"])
             fig.update_layout(
-                title=f"{sel_maker} — Month-over-Month Growth",
+                title="State-wise Registrations — India Map",
                 height=400,
                 paper_bgcolor=THEME["bg_primary"],
                 plot_bgcolor=THEME["bg_primary"],
@@ -627,7 +627,7 @@ with tab3:
                 marker=dict(size=8, color=THEME["accent"]), yaxis="y2",
             ))
             fig.update_layout(**plotly_layout(
-                title=f"{sel_maker} — Month-over-Month Growth",
+                title="Top 10 Maker Rank Over Months",
                 height=400,
                 yaxis=dict(title="Registrations", side="left", gridcolor=THEME["border"]),
                 yaxis2=dict(title="MoM %", side="right", overlaying="y", gridcolor="transparent"),
