@@ -54,7 +54,7 @@ cli_args, _ = parser.parse_known_args()
 # ===================================================================
 
 VAHAN_URL         = "https://vahan.parivahan.gov.in/vahan4dashboard/vahan/view/reportview.xhtml"
-YEAR              = "2026"
+YEAR              = "2025"
 X_AXIS            = "Month Wise"
 Y_AXIS            = "Maker"
 OUTPUT_DIR = "./vahan_downloads"  # GitHub Actions moves these to data/ after run
