@@ -389,10 +389,19 @@ with tab1:
             )
             fig.update_geos(fitbounds="locations", visible=False,
                             bgcolor=THEME["bg_primary"])
-            fig.update_layout(**plotly_layout(
-                height=520,
-                margin=dict(l=0, r=0, t=50, b=0),
-            ))
+            fig.update_layout(
+                title=f"{sel_maker} — Month-over-Month Growth",
+                height=400,
+                paper_bgcolor=THEME["bg_primary"],
+                plot_bgcolor=THEME["bg_primary"],
+                font=dict(color=THEME["text_primary"], family="Inter, sans-serif"),
+                title_font=dict(size=15, color=THEME["text_primary"]),
+                margin=dict(l=20, r=20, t=50, b=20),
+                yaxis=dict(title="Registrations", side="left", gridcolor=THEME["border"]),
+                yaxis2=dict(title="MoM %", side="right", overlaying="y", gridcolor="transparent"),
+                legend=dict(orientation="h", yanchor="bottom", y=1.02, font=dict(color=THEME["text_muted"])),
+                xaxis=dict(gridcolor=THEME["border"], zerolinecolor=THEME["border"]),
+            )
             st.plotly_chart(fig, use_container_width=True)
 
     st.divider()
