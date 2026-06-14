@@ -1,0 +1,10 @@
+# requirements.txt
+# Used by: Streamlit Cloud (app.py) + GitHub Actions (compile job)
+# Scraper uses its own environment via playwright install in the workflow
+
+streamlit>=1.35.0
+pandas>=2.0.0
+plotly>=5.20.0
+pyarrow>=14.0.0       # required by pandas to read/write parquet
+openpyxl>=3.1.0       # compile_parquet.py reads xlsx
+numpy>=1.26.0
