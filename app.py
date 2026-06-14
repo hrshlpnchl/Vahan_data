@@ -621,7 +621,7 @@ with tab3:
                 title=f"{sel_maker} — Month-over-Month Growth",
                 height=400,
                 yaxis=dict(title="Registrations", side="left", gridcolor=THEME["border"]),
-                yaxis2=dict(title="MoM %", side="right", overlaying="y", gridcolor="transparent"),
+                yaxis2=dict(title="MoM %", side="right", overlaying="y", showgrid=False),
                 legend=dict(orientation="h", yanchor="bottom", y=1.02),
             ))
             st.plotly_chart(fig, use_container_width=True)
