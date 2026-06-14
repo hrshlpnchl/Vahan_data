@@ -1,18 +1,17 @@
 # .github/workflows/scrape.yml
-# Runs the VAHAN scraper every day at 4:00 AM IST (22:30 UTC previous day)
-# Downloads fresh xlsx files into data/ and commits them.
-
 name: Daily VAHAN Scrape
 
 on:
   schedule:
-    - cron: "30 22 * * *"   # 22:30 UTC = 04:00 IST
-  workflow_dispatch:          # allow manual trigger from GitHub UI
+    - cron: "30 22 * * *"
+  workflow_dispatch:
 
 jobs:
   scrape:
     runs-on: ubuntu-latest
-    timeout-minutes: 180       # scraping 36 states × 6 combos takes ~2 hours
+    permissions:
+      contents: write
+    timeout-minutes: 180
 
     steps:
       - name: Checkout repo
@@ -34,6 +33,12 @@ jobs:
       - name: Install Playwright browsers
         run: playwright install chromium --with-deps
 
+      - name: Clear progress for fresh scrape
+        run: |
+          rm -f vahan_downloads/progress*.json
+          rm -f vahan_downloads/*.xlsx
+          echo "Cleared progress files for fresh run"
+
       - name: Run scraper
         run: |
           python scraper.py
@@ -43,7 +48,6 @@ jobs:
       - name: Move downloaded files to data/
         run: |
           mkdir -p data
-          # Move all xlsx files from vahan_downloads/ to data/
           if [ -d "vahan_downloads" ]; then
             find vahan_downloads -name "*.xlsx" -exec mv {} data/ \;
             echo "Moved $(ls data/*.xlsx 2>/dev/null | wc -l) xlsx files to data/"
@@ -56,7 +60,6 @@ jobs:
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add data/
-          # Only commit if there are changes
           if git diff --cached --quiet; then
             echo "No new data files to commit"
           else
