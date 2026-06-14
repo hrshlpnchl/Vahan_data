@@ -18,6 +18,8 @@ on:
 jobs:
   compile:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     timeout-minutes: 15
     # Only run if triggered manually, on schedule, OR if the scraper succeeded
     if: >
