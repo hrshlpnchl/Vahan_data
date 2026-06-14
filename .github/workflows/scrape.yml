@@ -1,0 +1,66 @@
+# .github/workflows/scrape.yml
+# Runs the VAHAN scraper every day at 4:00 AM IST (22:30 UTC previous day)
+# Downloads fresh xlsx files into data/ and commits them.
+
+name: Daily VAHAN Scrape
+
+on:
+  schedule:
+    - cron: "30 22 * * *"   # 22:30 UTC = 04:00 IST
+  workflow_dispatch:          # allow manual trigger from GitHub UI
+
+jobs:
+  scrape:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180       # scraping 36 states × 6 combos takes ~2 hours
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install playwright pandas openpyxl
+
+      - name: Install Playwright browsers
+        run: playwright install chromium --with-deps
+
+      - name: Run scraper
+        run: |
+          python scraper.py
+        env:
+          PYTHONUNBUFFERED: "1"
+
+      - name: Move downloaded files to data/
+        run: |
+          mkdir -p data
+          # Move all xlsx files from vahan_downloads/ to data/
+          if [ -d "vahan_downloads" ]; then
+            find vahan_downloads -name "*.xlsx" -exec mv {} data/ \;
+            echo "Moved $(ls data/*.xlsx 2>/dev/null | wc -l) xlsx files to data/"
+          else
+            echo "No vahan_downloads directory found"
+          fi
+
+      - name: Commit scraped data
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add data/
+          # Only commit if there are changes
+          if git diff --cached --quiet; then
+            echo "No new data files to commit"
+          else
+            COUNT=$(git diff --cached --name-only | grep "\.xlsx$" | wc -l)
+            git commit -m "chore: update vahan data — $COUNT files [$(date +'%Y-%m-%d')]"
+            git push
+          fi
