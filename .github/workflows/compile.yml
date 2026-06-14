@@ -1,0 +1,69 @@
+# .github/workflows/compile.yml
+# Runs 1 hour after the scraper (5:00 AM IST = 23:30 UTC)
+# Compiles all xlsx in data/ into master.parquet and commits it.
+# Streamlit Cloud detects the new commit and auto-redeploys.
+
+name: Compile Parquet
+
+on:
+  schedule:
+    - cron: "30 23 * * *"   # 23:30 UTC = 05:00 IST
+  workflow_dispatch:          # allow manual trigger
+
+  # Also run automatically after scrape.yml completes successfully
+  workflow_run:
+    workflows: ["Daily VAHAN Scrape"]
+    types: [completed]
+
+jobs:
+  compile:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    # Only run if triggered manually, on schedule, OR if the scraper succeeded
+    if: >
+      github.event_name == 'workflow_dispatch' ||
+      github.event_name == 'schedule' ||
+      github.event.workflow_run.conclusion == 'success'
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install pandas openpyxl pyarrow
+
+      - name: Count xlsx files
+        run: |
+          COUNT=$(ls data/*.xlsx 2>/dev/null | wc -l)
+          echo "Found $COUNT xlsx files in data/"
+          if [ "$COUNT" -eq 0 ]; then
+            echo "No xlsx files found — skipping compile"
+            exit 1
+          fi
+
+      - name: Compile master.parquet
+        run: |
+          python compile_parquet.py --data-dir ./data --out master.parquet
+
+      - name: Commit parquet
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add master.parquet
+          if git diff --cached --quiet; then
+            echo "Parquet unchanged — nothing to commit"
+          else
+            SIZE=$(du -sh master.parquet | cut -f1)
+            git commit -m "chore: recompile master.parquet ($SIZE) [$(date +'%Y-%m-%d %H:%M')]"
+            git push
+          fi
