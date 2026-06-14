@@ -389,19 +389,10 @@ with tab1:
             )
             fig.update_geos(fitbounds="locations", visible=False,
                             bgcolor=THEME["bg_primary"])
-            fig.update_layout(
-                title="State-wise Registrations — India Map",
-                height=400,
-                paper_bgcolor=THEME["bg_primary"],
-                plot_bgcolor=THEME["bg_primary"],
-                font=dict(color=THEME["text_primary"], family="Inter, sans-serif"),
-                title_font=dict(size=15, color=THEME["text_primary"]),
-                margin=dict(l=20, r=20, t=50, b=20),
-                yaxis=dict(title="Registrations", side="left", gridcolor=THEME["border"]),
-                yaxis2=dict(title="MoM %", side="right", overlaying="y", gridcolor="transparent"),
-                legend=dict(orientation="h", yanchor="bottom", y=1.02, font=dict(color=THEME["text_muted"])),
-                xaxis=dict(gridcolor=THEME["border"], zerolinecolor=THEME["border"]),
-            )
+            fig.update_layout(**plotly_layout(
+                height=520,
+                margin=dict(l=0, r=0, t=50, b=0),
+            ))
             st.plotly_chart(fig, use_container_width=True)
 
     st.divider()
@@ -627,7 +618,7 @@ with tab3:
                 marker=dict(size=8, color=THEME["accent"]), yaxis="y2",
             ))
             fig.update_layout(**plotly_layout(
-                title="Top 10 Maker Rank Over Months",
+                title=f"{sel_maker} — Month-over-Month Growth",
                 height=400,
                 yaxis=dict(title="Registrations", side="left", gridcolor=THEME["border"]),
                 yaxis2=dict(title="MoM %", side="right", overlaying="y", gridcolor="transparent"),
@@ -781,19 +772,11 @@ with tab6:
         fig = px.line(rank_df, x="Month", y="Rank", color="Maker",
                       title="Top 10 Maker Rank Over Months (lower = better)",
                       markers=True, color_discrete_sequence=COLOR_PALETTE)
-        fig.update_layout(
-                title=f"{sel_maker} — Month-over-Month Growth",
-                height=400,
-                paper_bgcolor=THEME["bg_primary"],
-                plot_bgcolor=THEME["bg_primary"],
-                font=dict(color=THEME["text_primary"], family="Inter, sans-serif"),
-                title_font=dict(size=15, color=THEME["text_primary"]),
-                margin=dict(l=20, r=20, t=50, b=20),
-                yaxis=dict(title="Registrations", side="left", gridcolor=THEME["border"]),
-                yaxis2=dict(title="MoM %", side="right", overlaying="y", gridcolor="transparent"),
-                legend=dict(orientation="h", yanchor="bottom", y=1.02, font=dict(color=THEME["text_muted"])),
-                xaxis=dict(gridcolor=THEME["border"], zerolinecolor=THEME["border"]),
-            )
+        fig.update_layout(**plotly_layout(
+            height=420,
+            yaxis=dict(autorange="reversed", dtick=1, gridcolor=THEME["border"]),
+            legend=dict(orientation="h", yanchor="bottom", y=-0.35),
+        ))
         st.plotly_chart(fig, use_container_width=True)
 
     st.divider()
