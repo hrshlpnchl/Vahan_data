@@ -35,24 +35,55 @@ jobs:
 
       - name: Clear progress for fresh scrape
         run: |
-          rm -f vahan_downloads/progress*.json
-          rm -f vahan_downloads/*.xlsx
-          echo "Cleared progress files for fresh run"
+          rm -rf vahan_downloads
+          mkdir -p vahan_downloads
+          echo "Wiped vahan_downloads for fresh run"
 
       - name: Run scraper
         run: |
-          python scraper.py
+          python scraper.py --no-resume
         env:
           PYTHONUNBUFFERED: "1"
+
+      - name: List scraper output (debug)
+        if: always()
+        run: |
+          echo "===== vahan_downloads contents ====="
+          ls -la vahan_downloads/ || echo "directory missing"
+          echo ""
+          echo "===== xlsx count ====="
+          ls vahan_downloads/*.xlsx 2>/dev/null | wc -l || echo "0"
+
+      - name: Upload diagnostics artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: scraper-diagnostics-${{ github.run_number }}
+          path: |
+            vahan_downloads/*.log
+            vahan_downloads/*.png
+          if-no-files-found: warn
+          retention-days: 14
 
       - name: Move downloaded files to data/
         run: |
           mkdir -p data
           if [ -d "vahan_downloads" ]; then
             find vahan_downloads -name "*.xlsx" -exec mv {} data/ \;
-            echo "Moved $(ls data/*.xlsx 2>/dev/null | wc -l) xlsx files to data/"
+            COUNT=$(ls data/*.xlsx 2>/dev/null | wc -l)
+            echo "Total xlsx files now in data/: $COUNT"
           else
             echo "No vahan_downloads directory found"
+          fi
+
+      - name: Verify scrape produced files
+        run: |
+          # Count xlsx files that were just modified in the last 60 minutes
+          NEW=$(find data -name "*.xlsx" -mmin -60 2>/dev/null | wc -l)
+          echo "Files freshly written this run: $NEW"
+          if [ "$NEW" -eq 0 ]; then
+            echo "::error::Scraper produced 0 new xlsx files. Check the diagnostics artifact for log + screenshots."
+            exit 1
           fi
 
       - name: Commit scraped data
