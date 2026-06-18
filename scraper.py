@@ -1,10 +1,19 @@
 #!/usr/bin/env python3
 """
-VAHAN EV SCRAPER v5.5 — Multi-Filter: 2W / 3W / 4W x PureEV / AllFuel
+VAHAN EV SCRAPER v5.5.1 — Multi-Filter: 2W / 3W / 4W x PureEV / AllFuel
 Author : Harshal Panchal
-Date   : 2026-06-13
+Date   : 2026-06-13  (v5.5.1 patch 2026-06-18)
 
-ROOT CAUSE FIXED IN v5.5:
+v5.5.1 surgical changes vs v5.5 (NO core-logic changes):
+  1) YEAR is now auto-detected from current IST date (was hard-coded "2025"
+     causing filename mismatch with existing 2026 xlsx files in data/).
+  2) New RUN_DATE constant (YYYYMMDD) is appended to every output filename
+     so each daily run produces uniquely-named files. compile_parquet.py
+     picks the latest date suffix per (state, combo, year) tuple.
+  3) Filename in download_state() now uses {YEAR}_{RUN_DATE} suffix.
+  4) Banner updated to v5.5.1.
+
+ROOT CAUSE FIXED IN v5.5 (unchanged here):
   The VAHAN portal generates the Excel file SERVER-SIDE only after the
   Refresh button is clicked AND the AJAX response fully completes.
   Previous versions clicked the download button before the server had
@@ -14,26 +23,11 @@ ROOT CAUSE FIXED IN v5.5:
   waits for the VAHAN AJAX response to carry a fresh data payload
   (detected by monitoring network responses for the groupingTable XHR).
   Only after that response is confirmed does it click the Excel download.
-
-  This exactly mimics what you do manually:
-    1. Set filter checkboxes
-    2. Click Refresh (inside filter panel)  ← filter panel Refresh
-    3. Wait for table to fully reload        ← XHR response detected
-    4. Click the Excel icon                  ← download fires on fresh data
-    5. File saved with correct name
-
-OTHER v5.5 CHANGES:
-  - Renamed output files match your convention (same as manual downloads
-    but with state + filter suffix instead of (1)(2)(3))
-  - Added WAIT_FOR_XHR_TIMEOUT: waits up to 30s for the data XHR
-  - Removed pre-download Main Refresh (was causing double-reload noise)
-  - clean_excel: numbers stored as text like '17,545' now parsed correctly
-  - CHECKBOX_WAIT kept at 0.8s (v5.4 value, proven stable)
 """
 
 import asyncio, os, time, logging, warnings, traceback
 import json, random, signal, argparse, tempfile, sys
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 import pandas as pd
 
 warnings.filterwarnings("ignore", category=UserWarning, module="openpyxl")
@@ -42,7 +36,7 @@ warnings.filterwarnings("ignore", category=UserWarning, module="openpyxl")
 #  CLI ARGUMENTS
 # ===================================================================
 
-parser = argparse.ArgumentParser(description="VAHAN EV Scraper v5.5")
+parser = argparse.ArgumentParser(description="VAHAN EV Scraper v5.5.1")
 parser.add_argument("--visible", action="store_true",
                     help="Show browser window (non-headless mode)")
 parser.add_argument("--no-resume", action="store_true",
@@ -54,10 +48,15 @@ cli_args, _ = parser.parse_known_args()
 # ===================================================================
 
 VAHAN_URL         = "https://vahan.parivahan.gov.in/vahan4dashboard/vahan/view/reportview.xhtml"
-YEAR              = "2025"
+
+# v5.5.1: auto-detect current IST year (was hard-coded "2025")
+_IST_NOW          = datetime.now(timezone.utc) + timedelta(hours=5, minutes=30)
+YEAR              = str(_IST_NOW.year)
+RUN_DATE          = _IST_NOW.strftime("%Y%m%d")   # YYYYMMDD suffix per run
+
 X_AXIS            = "Month Wise"
 Y_AXIS            = "Maker"
-OUTPUT_DIR = "./vahan_downloads"  # GitHub Actions moves these to data/ after run
+OUTPUT_DIR        = "./vahan_downloads"  # GitHub Actions moves these to data/ after run
 HEADLESS          = not cli_args.visible
 RESUME_ENABLED    = not cli_args.no_resume
 MAX_RETRIES       = 3
@@ -67,17 +66,17 @@ DOWNLOAD_TIMEOUT  = 120_000
 MIN_FILE_SIZE     = 3000
 
 # --- Timing ---
-AJAX_WAIT           = 1.5
-STATE_DELAY_MIN     = 2.0
-STATE_DELAY_MAX     = 5.0
-PANEL_OPEN_WAIT     = 1.0
-DROPDOWN_WAIT       = 0.5
-DISMISS_WAIT        = 0.15
-CHECKBOX_WAIT       = 0.8       # proven stable from v5.4
-CHECKBOX_RETRIES    = 3
-REFRESH_POST        = 3.5
-TABLE_STABLE_WAIT   = 1.5
-WAIT_FOR_XHR_TIMEOUT = 30      # seconds — wait for data XHR after Refresh
+AJAX_WAIT            = 1.5
+STATE_DELAY_MIN      = 2.0
+STATE_DELAY_MAX      = 5.0
+PANEL_OPEN_WAIT      = 1.0
+DROPDOWN_WAIT        = 0.5
+DISMISS_WAIT         = 0.15
+CHECKBOX_WAIT        = 0.8       # proven stable from v5.4
+CHECKBOX_RETRIES     = 3
+REFRESH_POST         = 3.5
+TABLE_STABLE_WAIT    = 1.5
+WAIT_FOR_XHR_TIMEOUT = 30        # seconds — wait for data XHR after Refresh
 
 # --- Vehicle Category Checkboxes ---
 VEHICLE_CATEGORIES = {
@@ -174,7 +173,7 @@ if sys.platform != "win32":
 
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 log_file = os.path.join(
-    OUTPUT_DIR, f"scraper_v55_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
+    OUTPUT_DIR, f"scraper_v551_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
 )
 logging.basicConfig(
     level=logging.INFO,
@@ -282,15 +281,6 @@ async def dismiss_overlays(page):
 
 # ===================================================================
 #  v5.5 KEY FIX — WAIT FOR DATA XHR AFTER REFRESH
-#
-#  After clicking Refresh, VAHAN fires an AJAX POST to update the
-#  groupingTable. We listen for that response using Playwright's
-#  page.expect_response(). Only when we see a response from the
-#  reportview URL with status 200 and a body > 5KB (real data, not
-#  an error page) do we proceed to the download click.
-#
-#  This is EXACTLY what happens when you manually wait for the table
-#  to reload before clicking the Excel icon.
 # ===================================================================
 
 async def wait_for_data_xhr(page, timeout_sec=WAIT_FOR_XHR_TIMEOUT):
@@ -302,7 +292,6 @@ async def wait_for_data_xhr(page, timeout_sec=WAIT_FOR_XHR_TIMEOUT):
     try:
         def is_data_response(response):
             url = response.url
-            # VAHAN posts back to the same reportview URL
             return (
                 "reportview" in url
                 and response.status == 200
@@ -356,7 +345,7 @@ async def wait_for_table_stable(page, label=""):
         if c1 == c2 and c1 > 0:
             log.info(f"    [TABLE] Stable at {c1} rows")
             return c1
-        log.info(f"    [TABLE] Still loading ({c1}→{c2})...")
+        log.info(f"    [TABLE] Still loading ({c1}->{c2})...")
 
     final = await page.locator("#groupingTable_data tr").count()
     log.warning(f"    [TABLE] Stability timeout — current: {final}")
@@ -395,7 +384,6 @@ async def set_checkbox(page, label_text, desired):
         if state["active"] == desired:
             return True  # already correct
 
-        # Try Playwright click first
         toggled = False
         try:
             loc = page.locator(
@@ -451,7 +439,6 @@ async def open_filter_panel(page):
 
 async def click_panel_refresh(page):
     """Click Refresh inside filter panel. Returns True on success."""
-    # Playwright locator
     try:
         loc = page.locator(
             "#filterLayout .ui-button:has-text('Refresh'), "
@@ -465,7 +452,6 @@ async def click_panel_refresh(page):
     except Exception:
         pass
 
-    # JS fallback
     try:
         result = await page.evaluate("""
         () => {
@@ -492,7 +478,7 @@ async def apply_filters(page, cat_key, pure_ev):
       1. Open filter panel
       2. Set + verify all checkboxes
       3. Click panel Refresh
-      4. Wait for data XHR response  ← KEY FIX
+      4. Wait for data XHR response  <- KEY FIX
       5. Wait for table stability
     """
     ev_str = "Yes" if pure_ev else "No"
@@ -519,8 +505,6 @@ async def apply_filters(page, cat_key, pure_ev):
 
         log.info("    [FILTER] All checkboxes confirmed — clicking panel Refresh")
 
-        # Start XHR listener BEFORE clicking Refresh
-        # (Playwright's expect_response is a context manager that pre-arms the listener)
         async with page.expect_response(
             lambda r: "reportview" in r.url and r.status == 200,
             timeout=WAIT_FOR_XHR_TIMEOUT * 1000
@@ -534,7 +518,6 @@ async def apply_filters(page, cat_key, pure_ev):
         if len(body) < 1000:
             log.warning(f"    [XHR] Response suspiciously small — may be stale")
 
-        # Extra stability wait for DOM to finish rendering
         await asyncio.sleep(jittered(REFRESH_POST))
         row_count = await wait_for_table_stable(page, label=f"{cat_key} PureEV={ev_str}")
 
@@ -565,7 +548,7 @@ async def audit_filter_state(page, expected_cat, expected_ev):
             continue
         should = (label in expected_labels) if label != FUEL_LABEL else expected_ev
         actual = state["active"]
-        icon   = "✓" if actual == should else "✗ MISMATCH"
+        icon   = "OK" if actual == should else "X MISMATCH"
         log.info(f"    [AUDIT]   [{icon}] '{label}' expected={'ON' if should else 'OFF'} actual={'ON' if actual else 'OFF'}")
         if actual != should:
             mismatch = True
@@ -740,7 +723,6 @@ async def setup_dashboard(page):
 
 # ===================================================================
 #  EXCEL CLEANER v5.5
-#  Numbers stored as text e.g. '17,545' now parsed correctly
 # ===================================================================
 
 def clean_excel(fpath, state_name, suffix, year):
@@ -753,7 +735,6 @@ def clean_excel(fpath, state_name, suffix, year):
         parts = suffix.replace("_", " ").replace("PureEV", "Pure EV").replace("AllFuel", "All Fuel")
         title = f"{state_name} {parts} {year} Maker Data"
 
-        # Unmerge
         wb_raw = openpyxl.load_workbook(fpath)
         ws_raw = wb_raw.active
         for mr in list(ws_raw.merged_cells.ranges):
@@ -772,7 +753,6 @@ def clean_excel(fpath, state_name, suffix, year):
         raw = pd.read_excel(temp_path, header=None, engine="openpyxl")
         log.info(f"    [CLEAN] Raw shape: {raw.shape}")
 
-        # Find month header row
         month_row_idx = None
         for ri in range(min(10, len(raw))):
             row_vals = [str(v).strip().upper() for v in raw.iloc[ri]]
@@ -816,7 +796,6 @@ def clean_excel(fpath, state_name, suffix, year):
             month_values = []
             for col_idx, _ in sorted_months:
                 v = row.iloc[col_idx] if col_idx < len(row) else 0
-                # v5.5: handle Indian comma-formatted numbers stored as text e.g. '17,545'
                 if isinstance(v, str):
                     v = v.replace(",", "").strip()
                 v_num = pd.to_numeric(v, errors="coerce")
@@ -830,7 +809,6 @@ def clean_excel(fpath, state_name, suffix, year):
             log.warning("    [CLEAN] No data rows found")
             return True
 
-        # Zero-total guard
         top5 = [r[-1] for r in data_rows[:5]]
         if all(t == 0 for t in top5):
             log.error("    [GUARD] All top-5 makers show 0 — suspected wrong filter. Deleting file.")
@@ -840,7 +818,6 @@ def clean_excel(fpath, state_name, suffix, year):
                 pass
             return False
 
-        # Write clean Excel
         wb = openpyxl.Workbook()
         ws = wb.active
         ws.title = "Data"
@@ -862,7 +839,6 @@ def clean_excel(fpath, state_name, suffix, year):
                 len(str(ws.cell(2, ci).value or "")),
                 max((len(str(ws.cell(ri, ci).value or "")) for ri in range(3, len(data_rows) + 3)), default=0)
             )
-            from openpyxl.utils import get_column_letter
             ws.column_dimensions[get_column_letter(ci)].width = max(max_len + 3, 10)
 
         wb.save(fpath)
@@ -907,14 +883,14 @@ async def download_state(page, state_name, idx):
         cat_key = combo["cat"]
         pure_ev = combo["ev"]
         suffix  = combo["suffix"]
-        fname   = f"{safe}_{suffix}_{YEAR}.xlsx"
+        # v5.5.1: append RUN_DATE so each daily run produces a unique filename
+        fname   = f"{safe}_{suffix}_{YEAR}_{RUN_DATE}.xlsx"
         fpath   = os.path.join(OUTPUT_DIR, fname)
 
         log.info(f"\n  {'-'*45}")
         log.info(f"  Combo {combo_idx}/{total_combos}: {suffix}")
         log.info(f"  {'-'*45}")
 
-        # Resume check
         if is_completed(safe, suffix):
             if os.path.exists(fpath):
                 is_valid, msg = validate_download(fpath)
@@ -930,14 +906,12 @@ async def download_state(page, state_name, idx):
             except Exception:
                 pass
 
-        # ── STEP A: Apply filters + wait for XHR ─────────────────
         log.info(f"    STEP A: Apply filters ({cat_key}, PureEV={pure_ev})...")
         if not await apply_filters(page, cat_key, pure_ev):
             log.error(f"    [FAIL] Filter apply failed — skipping {suffix}")
             results["failed"].append(suffix)
             continue
 
-        # ── STEP B: Audit ─────────────────────────────────────────
         log.info("    STEP B: Audit filter state...")
         if not await audit_filter_state(page, cat_key, pure_ev):
             log.error(f"    [FAIL] Audit mismatch — skipping {suffix}")
@@ -950,7 +924,6 @@ async def download_state(page, state_name, idx):
             results["failed"].append(suffix)
             continue
 
-        # ── STEP C: Confirm table has data ────────────────────────
         row_count = await page.locator("#groupingTable_data tr").count()
         log.info(f"    STEP C: Table rows = {row_count}")
         try:
@@ -966,7 +939,6 @@ async def download_state(page, state_name, idx):
             results["failed"].append(suffix)
             continue
 
-        # ── STEP D: Download ──────────────────────────────────────
         log.info(f"    STEP D: Download -> {fname}")
         try:
             btn = page.locator(
@@ -982,7 +954,6 @@ async def download_state(page, state_name, idx):
                 results["failed"].append(suffix)
                 continue
 
-            # Log button details for tracing
             btn_href = await btn.get_attribute("href")
             btn_id   = await btn.get_attribute("id")
             log.info(f"    [DL] btn id='{btn_id}' href='{btn_href}'")
@@ -1130,13 +1101,13 @@ async def scrape_all():
 async def main():
     t0 = time.time()
     log.info("+" + "="*62 + "+")
-    log.info("  VAHAN EV SCRAPER v5.5")
+    log.info("  VAHAN EV SCRAPER v5.5.1")
     log.info("  Multi-Filter: 2W / 3W / 4W x PureEV / AllFuel")
-    log.info("  v5.5: XHR-gated download — waits for server to regenerate Excel")
+    log.info("  v5.5.1: auto-year + dated filenames (YYYYMMDD suffix)")
     log.info("+" + "="*62 + "+")
-    log.info(f"States : {len(STATES)}  |  Combos/state : {len(FILTER_COMBOS)}  |  Total files : {len(STATES)*len(FILTER_COMBOS)}")
-    log.info(f"Year   : {YEAR}  |  Headless : {HEADLESS}  |  Resume : {RESUME_ENABLED}")
-    log.info(f"Output : {os.path.abspath(OUTPUT_DIR)}")
+    log.info(f"States   : {len(STATES)}  |  Combos/state : {len(FILTER_COMBOS)}  |  Total files : {len(STATES)*len(FILTER_COMBOS)}")
+    log.info(f"Year     : {YEAR}  |  Run Date : {RUN_DATE}  |  Headless : {HEADLESS}  |  Resume : {RESUME_ENABLED}")
+    log.info(f"Output   : {os.path.abspath(OUTPUT_DIR)}")
     log.info("")
 
     if RESUME_ENABLED:
@@ -1162,8 +1133,8 @@ async def main():
             log.info(f"  Failed  : {', '.join(str(f) for f in summary['failed'])}")
     if SHUTDOWN_REQUESTED:
         log.info("  NOTE: Interrupted — run again to resume")
-    log.info(f"  Time   : {elapsed/60:.1f} min ({elapsed:.0f}s)")
-    log.info(f"  Output : {os.path.abspath(OUTPUT_DIR)}")
+    log.info(f"  Time     : {elapsed/60:.1f} min ({elapsed:.0f}s)")
+    log.info(f"  Output   : {os.path.abspath(OUTPUT_DIR)}")
     log.info("="*65)
 
 
