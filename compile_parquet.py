@@ -1,19 +1,24 @@
 #!/usr/bin/env python3
 """
-compile_parquet.py - v3.0 (robust header detection)
+compile_parquet.py - v3.1 (handles BOTH cleaned and raw VAHAN xlsx formats)
 
-Compiles cleaned + raw Vahan xlsx files into one master.parquet for the Streamlit app.
+Format A (cleaned, e.g. Haryana_3W_AllFuel_2026.xlsx):
+    Row 1 : title
+    Row 2 : "S. No." | "Maker" | "Jan 2026" | "Feb 2026" | ... | "Total"
+    Row 3+: data
 
-Handles BOTH file formats automatically:
-  - Cleaned format : Row 1 title | Row 2 "S. No.|Maker|Jan 2026|..." | Row 3+ data
-  - Raw VAHAN      : Row 1 title | merged year row | "JAN|FEB|..." | data
+Format B (raw VAHAN, e.g. West_Bengal_4W_AllFuel_2026_20260618.xlsx):
+    Row 1 : title
+    Row 2 : "S" | "Maker" | (merged "Month Wise") | "TOTA"
+    Row 3 : "No" | <blank>  | <blanks across>  | "L"
+    Row 4 : <blank> | <blank> | "JAN" | "FEB" | "MAR" | ...
+    Row 5+: data
 
-For each unique (state, combo, year) tuple, picks the file with the LARGEST
-date suffix (YYYYMMDD) and ignores older duplicates.
-
-Output columns:
-  state | vehicle_category | fuel_type | year | month | maker | registrations
-        | source_file | source_date
+For each unique (state, combo, year), picks the file with the LARGEST date
+suffix and ignores older duplicates. Output: long-format master.parquet with
+columns:
+    state | vehicle_category | fuel_type | year | month | maker
+        | registrations | source_file | source_date
 """
 
 import argparse, os, re, sys, glob, logging, warnings
@@ -39,10 +44,9 @@ log = logging.getLogger("compile_parquet")
 # ---------------- Constants -----------------------------------------
 MONTH_ABBR = ["JAN","FEB","MAR","APR","MAY","JUN",
               "JUL","AUG","SEP","OCT","NOV","DEC"]
-MONTH_FULL = ["Jan","Feb","Mar","Apr","May","Jun",
-              "Jul","Aug","Sep","Oct","Nov","Dec"]
-MONTH_TO_NUM = {m.upper(): i+1 for i, m in enumerate(MONTH_FULL)}
+MONTH_TO_NUM = {m: i+1 for i, m in enumerate(MONTH_ABBR)}
 
+# Filename: <State>_<2W|3W|4W>_<PureEV|AllFuel>_<YYYY>[_<YYYYMMDD>].xlsx
 FNAME_RE = re.compile(
     r"^(?P<state>.+?)_(?P<combo>(?:2W|3W|4W)_(?:PureEV|AllFuel))_"
     r"(?P<year>\d{4})(?:_(?P<date>\d{8}))?\.xlsx$"
@@ -97,15 +101,14 @@ def pick_latest_files(data_dir):
     dropped = len(df) - len(df_latest)
 
     log.info(f"Picked {len(df_latest)} latest files; ignored {dropped} older duplicates")
-    log.info("Sample of selected:")
+    log.info("Sample of selected files:")
     for _, row in df_latest.head(5).iterrows():
         log.info(f"   [{row['date_suffix']}] {row['filename']}")
-
     return df_latest.to_dict("records"), dropped
 
-# ---------------- Unmerge cells in xlsx ------------------------------
+# ---------------- Unmerge + load -------------------------------------
 def unmerge_and_load(filepath):
-    """Unmerge all merged cells (propagate top-left value), return openpyxl wb."""
+    """Load xlsx, unmerge all merged cells (propagate top-left value)."""
     wb = openpyxl.load_workbook(filepath, data_only=True)
     ws = wb.active
     for mr in list(ws.merged_cells.ranges):
@@ -117,49 +120,77 @@ def unmerge_and_load(filepath):
     return wb, ws
 
 def ws_to_df(ws):
-    """Convert openpyxl worksheet to pandas DataFrame with no header."""
+    """Convert openpyxl worksheet (all values) to pandas DataFrame, no header."""
     data = list(ws.values)
     return pd.DataFrame(data)
+
+# ---------------- Detect month tokens in a cell ----------------------
+def extract_months_from_cell(val):
+    """
+    Return list of month-numbers (1-12) found in this single cell value.
+    Handles: 'JAN', 'Jan', 'Jan 2026', 'JAN-2026', 'jan_2026', 'JAN26', etc.
+    """
+    if val is None:
+        return []
+    s = str(val).strip().upper()
+    if not s:
+        return []
+    # Replace separators with spaces
+    for ch in ("-", "/", "_", ".", ",", ":"):
+        s = s.replace(ch, " ")
+    tokens = s.split()
+    months = []
+    for tok in tokens:
+        if len(tok) >= 3:
+            first3 = tok[:3]
+            if first3 in MONTH_TO_NUM:
+                months.append(MONTH_TO_NUM[first3])
+    return months
 
 # ---------------- Locate header row + maker col ----------------------
 def find_structure(df):
     """
-    Scan first ~10 rows. Return (header_row_idx, month_col_map, maker_col).
-    month_col_map: {col_idx: month_num}
-    Returns (None, {}, None) if not found.
+    Scan first 10 rows. Return (header_row_idx, month_col_map, maker_col).
+    month_col_map: {col_idx: month_num} ; maker_col: int
+    Returns (None, {}, None) if month row not found.
     """
     scan_rows = min(10, len(df))
     best_row, best_month_map = None, {}
 
-    for ri in range(scan_rows):
-        row_vals = [str(v).strip().upper() if v is not None else "" for v in df.iloc[ri]]
+    # Skip row 0 (title) — start from row 1
+    for ri in range(1, scan_rows):
         month_map = {}
-        for ci, val in enumerate(row_vals):
-            # Handle "JAN", "Jan 2026", "JAN 2026", etc.
-            tokens = val.replace(",", " ").split()
-            for tok in tokens:
-                t = tok.strip().upper()[:3]
-                if t in MONTH_TO_NUM:
-                    month_map[ci] = MONTH_TO_NUM[t]
-                    break
-        if len(month_map) > len(best_month_map):
+        for ci in range(len(df.columns)):
+            val = df.iat[ri, ci] if ci < df.shape[1] else None
+            months_in_cell = extract_months_from_cell(val)
+            if months_in_cell:
+                # one cell normally yields one month; take the first
+                month_map[ci] = months_in_cell[0]
+        # Score = number of distinct months found in this row
+        distinct = len(set(month_map.values()))
+        if distinct > len(set(best_month_map.values())):
             best_month_map = month_map
             best_row = ri
 
     if best_row is None or len(best_month_map) < 2:
         return None, {}, None
 
-    # Find Maker column - scan from header row back 2 rows
+    # Find Maker column: scan rows 1..header_row (skip row 0 title)
+    # STRICT exact match only — title like "Maker Month Wise Data of..." must NOT match
     maker_col = None
-    for ri in range(max(0, best_row - 2), best_row + 1):
-        for ci, val in enumerate([str(v).strip().upper() if v is not None else "" for v in df.iloc[ri]]):
-            if "MAKER" in val and len(val) < 30:  # not a long sentence
+    for ri in range(max(1, best_row - 3), best_row + 1):
+        for ci in range(df.shape[1]):
+            val = df.iat[ri, ci]
+            if val is None:
+                continue
+            s = str(val).strip().upper()
+            if s in ("MAKER", "MAKERS"):
                 maker_col = ci
                 break
         if maker_col is not None:
             break
 
-    # Fallback: column 1 (after S.No)
+    # Fallback: column 1 (B)
     if maker_col is None:
         maker_col = 1
 
@@ -167,7 +198,7 @@ def find_structure(df):
 
 # ---------------- Read one file --------------------------------------
 def read_one(file_info):
-    fp = file_info["filepath"]
+    fp    = file_info["filepath"]
     fname = file_info["filename"]
     try:
         wb, ws = unmerge_and_load(fp)
@@ -187,34 +218,46 @@ def read_one(file_info):
         log.warning(f"   [NO MONTHS] {fname}")
         return None
 
-    n_months = len(month_map)
+    n_months = len(set(month_map.values()))
     log.info(f"   [{fname}] header_row={header_row}, maker_col={maker_col}, months={n_months}")
 
-    # Extract data rows (everything after header_row)
+    # Extract data rows starting from row AFTER the month header row
     data_rows = []
+    sorted_month_cols = sorted(month_map.items(), key=lambda x: x[1])
+
     for ri in range(header_row + 1, len(df_raw)):
         row = df_raw.iloc[ri]
-        try:
-            maker_val = row.iloc[maker_col] if maker_col < len(row) else None
-        except Exception:
-            continue
+        # Maker
+        maker_val = row.iloc[maker_col] if maker_col < len(row) else None
         if maker_val is None or (isinstance(maker_val, float) and pd.isna(maker_val)):
             continue
         maker_str = str(maker_val).strip()
-        upper = maker_str.upper()
-        if not maker_str or upper in ("NAN", "MAKER", "TOTAL", "GRAND TOTAL", "S. NO.", "S.NO.", "SNO"):
+        upper     = maker_str.upper()
+        if not maker_str:
             continue
-        if upper.startswith("TOTAL"):
+        if upper in ("NAN", "MAKER", "MAKERS", "S. NO.", "S.NO.", "SNO", "S NO"):
+            continue
+        if upper.startswith("TOTAL") or upper.startswith("GRAND TOTAL"):
             continue
 
-        for col_idx, month_num in sorted(month_map.items(), key=lambda x: x[1]):
+        # Months
+        all_zero = True
+        row_recs = []
+        for col_idx, month_num in sorted_month_cols:
             v = row.iloc[col_idx] if col_idx < len(row) else 0
             if isinstance(v, str):
                 v = v.replace(",", "").strip()
             v_num = pd.to_numeric(v, errors="coerce")
-            reg = int(v_num) if not pd.isna(v_num) else 0
-            if reg == 0:
-                continue  # save space; can be reconstructed as 0 if needed
+            reg   = int(v_num) if not pd.isna(v_num) else 0
+            if reg != 0:
+                all_zero = False
+            row_recs.append((month_num, reg))
+
+        # Skip rows where everything is zero (phantom rows)
+        if all_zero:
+            continue
+
+        for month_num, reg in row_recs:
             data_rows.append({
                 "state":            file_info["state"],
                 "vehicle_category": file_info["vehicle_category"],
